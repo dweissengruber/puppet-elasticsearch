@@ -24,6 +24,9 @@ RSpec.configure do |c|
   # General-purpose spec-global variables
   c.add_setting :v, :default => {}
 
+  # Puppet debug logging
+  v[:puppet_debug] = ENV['BEAKER_debug'] ? true : false
+
   unless ENV['snapshot_version'].nil?
     v[:snapshot_version] = ENV['snapshot_version']
     v[:is_snapshot] = ENV['SNAPSHOT_TEST'] == 'true'
@@ -33,12 +36,12 @@ RSpec.configure do |c|
     v[:elasticsearch_full_version] = ENV['ELASTICSEARCH_VERSION'] || v[:snapshot_version]
     v[:elasticsearch_major_version] = v[:elasticsearch_full_version].split('.').first.to_i
     v[:elasticsearch_package] = {}
-    v[:template] = if v[:elasticsearch_major_version] < 6
-                     JSON.load(File.new('spec/fixtures/templates/pre_6.0.json'))
+    v[:template] = if v[:elasticsearch_major_version] == 6
+                     JSON.load(File.new('spec/fixtures/templates/6.x.json'))
                    elsif v[:elasticsearch_major_version] >= 8
                      JSON.load(File.new('spec/fixtures/templates/post_8.0.json'))
                    else
-                     JSON.load(File.new('spec/fixtures/templates/post_6.0.json'))
+                     JSON.load(File.new('spec/fixtures/templates/7.x.json'))
                    end
     v[:template] = Puppet_X::Elastic.deep_to_i(Puppet_X::Elastic.deep_to_s(v[:template]))
     v[:pipeline] = JSON.load(File.new('spec/fixtures/pipelines/example.json'))
@@ -66,10 +69,6 @@ RSpec.configure do |c|
   c.default_sleep_interval = 10
   # General-case retry keyword for unstable tests
   c.around :each, :with_retries do |example|
-    example.run_with_retry retry: 4
-  end
-  # More forgiving retry config for really flaky tests
-  c.around :each, :with_generous_retries do |example|
     example.run_with_retry retry: 10
   end
 
@@ -81,7 +80,6 @@ RSpec.configure do |c|
         manage_repo => true,
         oss         => #{v[:oss]},
       }
-      elasticsearch::instance { 'es-01': ensure => 'absent' }
 
       file { '/usr/share/elasticsearch/plugin':
         ensure  => 'absent',
@@ -109,7 +107,11 @@ RSpec.configure do |c|
 
   c.before :context, :with_license do
     Vault.address = ENV['VAULT_ADDR']
-    Vault.auth.approle ENV['VAULT_APPROLE_ROLE_ID'], ENV['VAULT_APPROLE_SECRET_ID']
+    if ENV['CI']
+      Vault.auth.approle(ENV['VAULT_APPROLE_ROLE_ID'], ENV['VAULT_APPROLE_SECRET_ID'])
+    else
+      Vault.auth.token(ENV['VAULT_TOKEN'])
+    end
     licenses = Vault.with_retries(Vault::HTTPConnectionError) do
       Vault.logical.read(ENV['VAULT_PATH'])
     end.data
@@ -117,10 +119,10 @@ RSpec.configure do |c|
     raise 'No license found!' unless licenses
 
     license = case v[:elasticsearch_major_version]
-              when 2
-                licenses[:v2]
-              else
+              when 6
                 licenses[:v5]
+              else
+                licenses[:v7]
               end
     create_remote_file hosts, '/tmp/license.json', license
     v[:elasticsearch_license_path] = '/tmp/license.json'
